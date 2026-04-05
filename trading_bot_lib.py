@@ -932,7 +932,7 @@ class BotExecutionCoordinator:
         self._temp_blacklist = {}
         self._blacklist_lock = threading.RLock()
 
-    def add_temp_blacklist(self, symbol, duration=300):
+    def add_temp_blacklist(self, symbol, duration=1800):
         expiry = time.time() + duration
         with self._blacklist_lock:
             self._temp_blacklist[symbol.upper()] = expiry
@@ -1796,7 +1796,7 @@ class BaseBot:
         if failed:
             if hasattr(self, '_bot_manager') and self._bot_manager:
                 self._bot_manager.bot_coordinator.release_coin(symbol)
-                self._bot_manager.bot_coordinator.add_temp_blacklist(symbol, duration=300)
+                self._bot_manager.bot_coordinator.add_temp_blacklist(symbol, duration=1800)
             self.consecutive_failures += 1
             cooldown = min(60, 5 * self.consecutive_failures)
             self.failure_cooldown_until = time.time() + cooldown
