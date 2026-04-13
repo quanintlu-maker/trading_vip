@@ -1884,6 +1884,8 @@ class BaseBot:
             return
         if data['pyramiding_count'] >= self.pyramiding_n:
             return
+        if data['side'] != 'BUY':
+            return
 
         # Lấy entry mới nhất từ API (ưu tiên)
         real_pos = self._force_check_position(symbol)
