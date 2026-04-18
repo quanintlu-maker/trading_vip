@@ -1,7 +1,9 @@
-# trading_bot_lib_merged_v2_part1_fixed.py
+# trading_bot_lib_merged_v3.py
 # =============================================================================
-#  KẾT HỢP: LOGIC XỬ LÝ LỆNH TỪ FILE 8 + CACHE & API TỪ FILE 7
-#  (Phần 1: đến trước class BotManager) - ĐÃ SỬA LỖI PYRAMIDING & ROI = 0
+#  KẾT HỢP: LOGIC XỬ LÝ LỆNH + CACHE & API + LỌC GIÁ & VOLUME (MIN/MAX)
+#  Phiên bản tích hợp đầy đủ tính năng lọc khoảng giá và khối lượng
+# =============================================================================
+# PHẦN 1: IMPORTS, CẤU HÌNH, CACHE, HÀM TIỆN ÍCH, API, LỌC COIN, KEYBOARDS
 # =============================================================================
 
 import json
@@ -79,7 +81,7 @@ class CoinCache:
 
 _COINS_CACHE = CoinCache()
 
-# ========== CẤU HÌNH CÂN BẰNG LỆNH ==========
+# ========== CẤU HÌNH CÂN BẰNG LỆNH (MỞ RỘNG VỚI MIN/MAX PRICE & VOLUME) ==========
 class BalanceConfig:
     def __init__(self):
         self._config = {
@@ -87,6 +89,11 @@ class BalanceConfig:
             "sell_price_threshold": 10.0,
             "min_leverage": 10,
             "sort_by_volume": True,
+            # Bộ lọc mới
+            "min_price": 0.0,
+            "max_price": float('inf'),
+            "min_volume": 0.0,
+            "max_volume": float('inf')
         }
         self._lock = threading.RLock()
 
@@ -186,7 +193,7 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
     except Exception as e:
         logger.error(f"Lỗi kết nối Telegram: {str(e)}")
 
-# ========== HÀM TẠO BÀN PHÍM (giữ nguyên) ==========
+# ========== HÀM TẠO BÀN PHÍM ==========
 def create_main_menu():
     return {
         "keyboard": [
@@ -338,6 +345,55 @@ def create_price_threshold_keyboard():
             [{"text": "❌ Hủy bỏ"}]
         ],
         "resize_keyboard": True, "one_time_keyboard": True
+    }
+
+# Các bàn phím mới cho bộ lọc min/max price và volume
+def create_min_price_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "0"}, {"text": "0.5"}, {"text": "1.0"}],
+            [{"text": "2.0"}, {"text": "5.0"}, {"text": "10.0"}],
+            [{"text": "❌ Bỏ qua"}],
+            [{"text": "❌ Hủy bỏ"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+def create_max_price_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "10"}, {"text": "50"}, {"text": "100"}],
+            [{"text": "500"}, {"text": "1000"}, {"text": "5000"}],
+            [{"text": "❌ Bỏ qua"}],
+            [{"text": "❌ Hủy bỏ"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+def create_min_volume_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "0"}, {"text": "10000"}, {"text": "50000"}],
+            [{"text": "100000"}, {"text": "500000"}, {"text": "1000000"}],
+            [{"text": "❌ Bỏ qua"}],
+            [{"text": "❌ Hủy bỏ"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
+    }
+
+def create_max_volume_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "1000000"}, {"text": "5000000"}, {"text": "10000000"}],
+            [{"text": "50000000"}, {"text": "100000000"}, {"text": "500000000"}],
+            [{"text": "❌ Bỏ qua"}],
+            [{"text": "❌ Hủy bỏ"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": True
     }
 
 # ========== HÀM API BINANCE CẢI TIẾN ==========
@@ -575,7 +631,7 @@ def force_refresh_coin_cache():
         return True
     return False
 
-# ========== HÀM LỌC COIN ==========
+# ========== HÀM LỌC COIN (ĐÃ TÍCH HỢP MIN/MAX PRICE & VOLUME) ==========
 def filter_coins_for_side(side, excluded_coins=None):
     all_coins = get_coins_with_info()
     filtered = []
@@ -586,9 +642,15 @@ def filter_coins_for_side(side, excluded_coins=None):
 
     buy_threshold = _BALANCE_CONFIG.get("buy_price_threshold", 1.0)
     sell_threshold = _BALANCE_CONFIG.get("sell_price_threshold", 10.0)
+    min_price = _BALANCE_CONFIG.get("min_price", 0.0)
+    max_price = _BALANCE_CONFIG.get("max_price", float('inf'))
+    min_volume = _BALANCE_CONFIG.get("min_volume", 0.0)
+    max_volume = _BALANCE_CONFIG.get("max_volume", float('inf'))
 
     logger.info(f"🔍 Lọc coin {side} | {len(all_coins)} coin trong cache")
     logger.info(f"⚙️ Ngưỡng: MUA < {buy_threshold} USDT/USDC, BÁN > {sell_threshold} USDT/USDC")
+    logger.info(f"📏 Khoảng giá: {min_price} - {max_price} USDT/USDC")
+    logger.info(f"📊 Khoảng volume: {min_volume} - {max_volume}")
 
     excluded_set = set(excluded_coins or [])
     blacklisted = 0
@@ -596,6 +658,8 @@ def filter_coins_for_side(side, excluded_coins=None):
     price_fail = 0
     volume_zero = 0
     price_zero = 0
+    range_fail = 0
+    volume_range_fail = 0
 
     for coin in all_coins:
         sym = coin['symbol']
@@ -611,6 +675,7 @@ def filter_coins_for_side(side, excluded_coins=None):
         if coin['volume'] <= 0:
             volume_zero += 1
 
+        # Lọc theo hướng BUY/SELL
         if side == "BUY" and coin['price'] >= buy_threshold:
             price_fail += 1
             continue
@@ -618,21 +683,37 @@ def filter_coins_for_side(side, excluded_coins=None):
             price_fail += 1
             continue
 
+        # Lọc khoảng giá chung
+        if not (min_price <= coin['price'] <= max_price):
+            range_fail += 1
+            continue
+
+        # Lọc khoảng volume
+        if not (min_volume <= coin['volume'] <= max_volume):
+            volume_range_fail += 1
+            continue
+
         filtered.append(coin)
 
-    logger.info(f"📊 {side}: {len(filtered)} coin phù hợp (loại: blacklist={blacklisted}, excluded={excluded_cnt}, giá={price_fail}, volume0={volume_zero}, price0={price_zero})")
+    logger.info(f"📊 {side}: {len(filtered)} coin phù hợp (loại: blacklist={blacklisted}, excluded={excluded_cnt}, giá={price_fail}, volume0={volume_zero}, price0={price_zero}, ngoài khoảng giá={range_fail}, ngoài khoảng volume={volume_range_fail})")
     if filtered:
         for i, c in enumerate(filtered[:5]):
             logger.info(f"  {i+1}. {c['symbol']} | giá: {c['price']:.4f} | volume: {c['volume']:.2f}")
 
     return filtered
 
-def update_balance_config(buy_price_threshold=None, sell_price_threshold=None, min_leverage=None, sort_by_volume=None):
+def update_balance_config(buy_price_threshold=None, sell_price_threshold=None, min_leverage=None,
+                          sort_by_volume=None, min_price=None, max_price=None,
+                          min_volume=None, max_volume=None):
     _BALANCE_CONFIG.update(
         buy_price_threshold=buy_price_threshold,
         sell_price_threshold=sell_price_threshold,
         min_leverage=min_leverage,
-        sort_by_volume=sort_by_volume
+        sort_by_volume=sort_by_volume,
+        min_price=min_price,
+        max_price=max_price,
+        min_volume=min_volume,
+        max_volume=max_volume
     )
     logger.info(f"✅ Cập nhật cấu hình cân bằng: {_BALANCE_CONFIG.get_all()}")
     return _BALANCE_CONFIG.get_all()
@@ -1221,7 +1302,12 @@ class WebSocketManager:
             self.remove_symbol(symbol)
         self.executor.shutdown(wait=False)
 
-# ========== LỚP BOT CỐT LÕI (ĐÃ SỬA LỖI PYRAMIDING & ROI) ==========
+# ========== KẾT THÚC PHẦN 1 ==========
+
+# =============================================================================
+# PHẦN 2: LỚP BOT CỐT LÕI (BaseBot) VÀ BotManager (ĐÃ TÍCH HỢP LỌC MIN/MAX)
+# =============================================================================
+
 class BaseBot:
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager, api_key, api_secret,
                  telegram_bot_token, telegram_chat_id, strategy_name, config_key=None, bot_id=None,
@@ -1292,11 +1378,19 @@ class BaseBot:
         self.balance_config = {
             'buy_price_threshold': kwargs.get('buy_price_threshold', 1.0),
             'sell_price_threshold': kwargs.get('sell_price_threshold', 10.0),
-            'min_leverage': _BALANCE_CONFIG.get("min_leverage", 10)
+            'min_leverage': _BALANCE_CONFIG.get("min_leverage", 10),
+            'min_price': kwargs.get('min_price', 0.0),
+            'max_price': kwargs.get('max_price', float('inf')),
+            'min_volume': kwargs.get('min_volume', 0.0),
+            'max_volume': kwargs.get('max_volume', float('inf'))
         }
         update_balance_config(
             buy_price_threshold=self.balance_config['buy_price_threshold'],
-            sell_price_threshold=self.balance_config['sell_price_threshold']
+            sell_price_threshold=self.balance_config['sell_price_threshold'],
+            min_price=self.balance_config['min_price'],
+            max_price=self.balance_config['max_price'],
+            min_volume=self.balance_config['min_volume'],
+            max_volume=self.balance_config['max_volume']
         )
 
         self.consecutive_failures = 0
@@ -1313,6 +1407,8 @@ class BaseBot:
         balance_info = (f" | ⚖️ Cân bằng lệnh: BẬT | "
                         f"Mua <{self.balance_config['buy_price_threshold']} USDT/USDC | "
                         f"Bán >{self.balance_config['sell_price_threshold']} USDT/USDC | "
+                        f"Giá: {self.balance_config['min_price']}-{self.balance_config['max_price']} | "
+                        f"Volume: {self.balance_config['min_volume']}-{self.balance_config['max_volume']} | "
                         f"Lev tối thiểu: {_BALANCE_CONFIG.get('min_leverage', 10)}x | "
                         f"Sắp xếp: Volume giảm dần")
 
@@ -2100,8 +2196,7 @@ class BaseBot:
 class GlobalMarketBot(BaseBot):
     pass
 
-# ========== KẾT THÚC PHẦN 1 ==========
-
+# ========== BotManager (ĐÃ CẬP NHẬT XỬ LÝ MIN/MAX) ==========
 class BotManager:
     def __init__(self, api_key=None, api_secret=None, telegram_bot_token=None, telegram_chat_id=None):
         self.ws_manager = WebSocketManager()
@@ -2187,7 +2282,6 @@ class BotManager:
             total_bots_with_coins, trading_bots = 0, 0
             balance_bots = 0
 
-            # Sắp xếp bot theo thời gian tạo để đánh số thứ tự
             sorted_bots = sorted(self.bots.items(), key=lambda item: item[1].bot_creation_time)
             for idx, (bot_id, bot) in enumerate(sorted_bots, start=1):
                 has_coin = len(bot.active_symbols) > 0 if hasattr(bot, 'active_symbols') else False
@@ -2312,7 +2406,8 @@ class BotManager:
             "• Yêu cầu đòn bẩy tối thiểu: 10x (kiểm tra thực tế khi set leverage)\n"
             "• SẮP XẾP theo khối lượng giao dịch GIẢM DẦN (ưu tiên thanh khoản cao)\n"
             "• Loại trừ coin đã có vị thế / đang theo dõi\n"
-            "• Loại trừ BTCUSDT, ETHUSDT, BTCUSDC, ETHUSDC\n\n"
+            "• Loại trừ BTCUSDT, ETHUSDT, BTCUSDC, ETHUSDC\n"
+            "• Có thể lọc thêm theo khoảng giá và khối lượng (min/max)\n\n"
             "🔄 <b>NHỒI LỆNH (PYRAMIDING):</b>\n"
             "• Nhồi lệnh cùng chiều khi đạt mốc ROI\n"
             "• Số lần nhồi và mốc ROI tùy chỉnh\n"
@@ -2326,7 +2421,6 @@ class BotManager:
                      bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
 
     def add_bot(self, symbol, lev, percent, tp, sl, roi_trigger, strategy_type, bot_count=1, **kwargs):
-        # Chuyển sl = 0 thành None (tắt)
         if sl == 0: sl = None
 
         if not self.api_key or not self.api_secret:
@@ -2344,6 +2438,10 @@ class BotManager:
         enable_balance_orders = kwargs.get('enable_balance_orders', True)
         buy_price_threshold = kwargs.get('buy_price_threshold', 1.0)
         sell_price_threshold = kwargs.get('sell_price_threshold', 10.0)
+        min_price = kwargs.get('min_price', 0.0)
+        max_price = kwargs.get('max_price', float('inf'))
+        min_volume = kwargs.get('min_volume', 0.0)
+        max_volume = kwargs.get('max_volume', float('inf'))
 
         created_count = 0
 
@@ -2357,7 +2455,6 @@ class BotManager:
                 if bot_id in self.bots:
                     continue
 
-                # Sử dụng BaseBot thay vì GlobalMarketBot (GlobalMarketBot vẫn là alias)
                 bot = BaseBot(
                     symbol, lev, percent, tp, sl, roi_trigger, self.ws_manager,
                     self.api_key, self.api_secret, self.telegram_bot_token, self.telegram_chat_id,
@@ -2367,6 +2464,8 @@ class BotManager:
                     enable_balance_orders=enable_balance_orders,
                     buy_price_threshold=buy_price_threshold,
                     sell_price_threshold=sell_price_threshold,
+                    min_price=min_price, max_price=max_price,
+                    min_volume=min_volume, max_volume=max_volume,
                     strategy_name=strategy_type
                 )
                 bot._bot_manager = self
@@ -2385,6 +2484,8 @@ class BotManager:
                 balance_info = (f"\n⚖️ <b>CÂN BẰNG LỆNH: BẬT</b>\n"
                                 f"• Mua: giá < {buy_price_threshold} USDT/USDC\n"
                                 f"• Bán: giá > {sell_price_threshold} USDT/USDC\n"
+                                f"• Giá: {min_price} - {max_price} USDT\n"
+                                f"• Volume 24h: {min_volume} - {max_volume}\n"
                                 f"• Đòn bẩy tối thiểu: {_BALANCE_CONFIG.get('min_leverage', 10)}x (kiểm tra thực tế)\n"
                                 f"• SẮP XẾP: Theo khối lượng giảm dần\n")
 
@@ -2416,7 +2517,7 @@ class BotManager:
             self.log("❌ Không thể tạo bot")
             return False
 
-    # ----- Các phương thức dừng coin, bot... (giữ nguyên từ file 7) -----
+    # ----- Các phương thức dừng coin, bot... (giữ nguyên) -----
     def stop_coin(self, symbol):
         stopped_count = 0
         symbol = symbol.upper()
@@ -2491,7 +2592,7 @@ class BotManager:
             self.stop_bot(bot_id)
         self.log("🔴 Đã dừng tất cả bot, hệ thống vẫn chạy")
 
-    # ----- Telegram listener cải tiến (từ file 7) -----
+    # ----- Telegram listener cải tiến (cập nhật thêm bước lọc min/max) -----
     def _telegram_listener(self):
         last_update_id = 0
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='tg_handler')
@@ -2525,7 +2626,6 @@ class BotManager:
             logger.error(f"Lỗi xử lý tin nhắn Telegram: {str(e)}")
 
     def _process_telegram_command(self, chat_id, text):
-        # (Giữ nguyên từ file 7, chỉ cập nhật nếu cần)
         user_state = self.user_states.get(chat_id, {})
         current_step = user_state.get('step')
 
@@ -2611,6 +2711,8 @@ class BotManager:
             sort_status = "BẬT (volume giảm dần)" if _BALANCE_CONFIG.get('sort_by_volume', True) else "TẮT"
             send_telegram(f"🎯 Chiến lược hiện tại: Cân bằng lệnh (BUY <{_BALANCE_CONFIG.get('buy_price_threshold', 1.0)}, SELL >{_BALANCE_CONFIG.get('sell_price_threshold', 10.0)}).\n"
                          f"📊 Sắp xếp coin: {sort_status}\n"
+                         f"📏 Khoảng giá: {_BALANCE_CONFIG.get('min_price',0)} - {_BALANCE_CONFIG.get('max_price','∞')} USDT\n"
+                         f"📊 Khoảng volume: {_BALANCE_CONFIG.get('min_volume',0)} - {_BALANCE_CONFIG.get('max_volume','∞')}\n"
                          f"Dùng /balance để cấu hình.",
                          chat_id=chat_id, bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
 
@@ -2625,7 +2727,7 @@ class BotManager:
             send_telegram("❌ Đã hủy thao tác.", chat_id=chat_id, reply_markup=create_main_menu(),
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
 
-        # --- Các bước tạo bot (giữ nguyên từ file 7) ---
+        # --- Các bước tạo bot (đã mở rộng với min/max price & volume) ---
         elif current_step == 'waiting_bot_mode':
             if text == "🤖 Bot Tĩnh - Coin cụ thể":
                 user_state['bot_mode'] = 'static'
@@ -2861,16 +2963,122 @@ class BotManager:
                 if sell_threshold <= 0:
                     raise ValueError
                 user_state['sell_price_threshold'] = sell_threshold
-                update_balance_config(
-                    buy_price_threshold=user_state.get('buy_price_threshold', 1.0),
-                    sell_price_threshold=user_state.get('sell_price_threshold', 10.0),
-                    sort_by_volume=True
-                )
-                self._finish_bot_creation(chat_id, user_state)
+                # Chuyển sang hỏi min_price
+                user_state['step'] = 'waiting_min_price'
+                send_telegram("📉 Nhập giá tối thiểu cho coin (USDT/USDC) - hoặc '❌ Bỏ qua':",
+                             chat_id=chat_id, reply_markup=create_min_price_keyboard(),
+                             bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
             except ValueError:
                 send_telegram("⚠️ Vui lòng nhập số > 0.", chat_id=chat_id,
                              reply_markup=create_price_threshold_keyboard(),
                              bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+
+        elif current_step == 'waiting_min_price':
+            if text == "❌ Bỏ qua":
+                user_state['min_price'] = 0.0
+            elif text != "❌ Hủy bỏ":
+                try:
+                    min_price = float(text)
+                    if min_price < 0:
+                        raise ValueError
+                    user_state['min_price'] = min_price
+                except:
+                    send_telegram("⚠️ Vui lòng nhập số >= 0.", chat_id=chat_id,
+                                 reply_markup=create_min_price_keyboard(),
+                                 bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                    return
+            else:
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy.", chat_id=chat_id, reply_markup=create_main_menu(),
+                             bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                return
+
+            user_state['step'] = 'waiting_max_price'
+            send_telegram("📈 Nhập giá tối đa cho coin (USDT/USDC) - hoặc '❌ Bỏ qua':",
+                         chat_id=chat_id, reply_markup=create_max_price_keyboard(),
+                         bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+
+        elif current_step == 'waiting_max_price':
+            if text == "❌ Bỏ qua":
+                user_state['max_price'] = float('inf')
+            elif text != "❌ Hủy bỏ":
+                try:
+                    max_price = float(text)
+                    if max_price <= 0:
+                        raise ValueError
+                    user_state['max_price'] = max_price
+                except:
+                    send_telegram("⚠️ Vui lòng nhập số > 0.", chat_id=chat_id,
+                                 reply_markup=create_max_price_keyboard(),
+                                 bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                    return
+            else:
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy.", chat_id=chat_id, reply_markup=create_main_menu(),
+                             bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                return
+
+            user_state['step'] = 'waiting_min_volume'
+            send_telegram("📊 Nhập khối lượng giao dịch 24h tối thiểu (USDT) - hoặc '❌ Bỏ qua':",
+                         chat_id=chat_id, reply_markup=create_min_volume_keyboard(),
+                         bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+
+        elif current_step == 'waiting_min_volume':
+            if text == "❌ Bỏ qua":
+                user_state['min_volume'] = 0.0
+            elif text != "❌ Hủy bỏ":
+                try:
+                    min_volume = float(text)
+                    if min_volume < 0:
+                        raise ValueError
+                    user_state['min_volume'] = min_volume
+                except:
+                    send_telegram("⚠️ Vui lòng nhập số >= 0.", chat_id=chat_id,
+                                 reply_markup=create_min_volume_keyboard(),
+                                 bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                    return
+            else:
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy.", chat_id=chat_id, reply_markup=create_main_menu(),
+                             bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                return
+
+            user_state['step'] = 'waiting_max_volume'
+            send_telegram("📊 Nhập khối lượng giao dịch 24h tối đa (USDT) - hoặc '❌ Bỏ qua':",
+                         chat_id=chat_id, reply_markup=create_max_volume_keyboard(),
+                         bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+
+        elif current_step == 'waiting_max_volume':
+            if text == "❌ Bỏ qua":
+                user_state['max_volume'] = float('inf')
+            elif text != "❌ Hủy bỏ":
+                try:
+                    max_volume = float(text)
+                    if max_volume <= 0:
+                        raise ValueError
+                    user_state['max_volume'] = max_volume
+                except:
+                    send_telegram("⚠️ Vui lòng nhập số > 0.", chat_id=chat_id,
+                                 reply_markup=create_max_volume_keyboard(),
+                                 bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                    return
+            else:
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy.", chat_id=chat_id, reply_markup=create_main_menu(),
+                             bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+                return
+
+            # Cập nhật cấu hình chung trước khi tạo bot
+            update_balance_config(
+                buy_price_threshold=user_state.get('buy_price_threshold', 1.0),
+                sell_price_threshold=user_state.get('sell_price_threshold', 10.0),
+                min_price=user_state.get('min_price', 0.0),
+                max_price=user_state.get('max_price', float('inf')),
+                min_volume=user_state.get('min_volume', 0.0),
+                max_volume=user_state.get('max_volume', float('inf')),
+                sort_by_volume=True
+            )
+            self._finish_bot_creation(chat_id, user_state)
 
         elif current_step == 'waiting_balance_config':
             if text == '⚖️ Bật cân bằng lệnh':
@@ -2899,6 +3107,8 @@ class BotManager:
                     f"⚖️ <b>CẤU HÌNH CÂN BẰNG HIỆN TẠI</b>\n\n"
                     f"• Ngưỡng giá MUA: < {_BALANCE_CONFIG.get('buy_price_threshold', 1.0)} USDT/USDC\n"
                     f"• Ngưỡng giá BÁN: > {_BALANCE_CONFIG.get('sell_price_threshold', 10.0)} USDT/USDC\n"
+                    f"• Khoảng giá: {_BALANCE_CONFIG.get('min_price',0)} - {_BALANCE_CONFIG.get('max_price','∞')} USDT\n"
+                    f"• Khoảng volume 24h: {_BALANCE_CONFIG.get('min_volume',0)} - {_BALANCE_CONFIG.get('max_volume','∞')}\n"
                     f"• Đòn bẩy tối thiểu: {_BALANCE_CONFIG.get('min_leverage', 10)}x (kiểm tra thực tế)\n"
                     f"• Sắp xếp coin: {sort_status}\n\n"
                     f"🔄 <b>CACHE HỆ THỐNG</b>\n"
@@ -2975,6 +3185,10 @@ class BotManager:
             enable_balance_orders = user_state.get('enable_balance_orders', True)
             buy_price_threshold = user_state.get('buy_price_threshold', 1.0)
             sell_price_threshold = user_state.get('sell_price_threshold', 10.0)
+            min_price = user_state.get('min_price', 0.0)
+            max_price = user_state.get('max_price', float('inf'))
+            min_volume = user_state.get('min_volume', 0.0)
+            max_volume = user_state.get('max_volume', float('inf'))
 
             success = self.add_bot(
                 symbol=symbol, lev=leverage, percent=percent, tp=tp, sl=sl,
@@ -2983,19 +3197,25 @@ class BotManager:
                 pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x,
                 enable_balance_orders=enable_balance_orders,
                 buy_price_threshold=buy_price_threshold,
-                sell_price_threshold=sell_price_threshold
+                sell_price_threshold=sell_price_threshold,
+                min_price=min_price, max_price=max_price,
+                min_volume=min_volume, max_volume=max_volume
             )
 
             if success:
                 roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else ""
                 pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if pyramiding_n > 0 and pyramiding_x > 0 else ""
                 balance_info = " | ⚖️ Cân bằng: BẬT" if enable_balance_orders else ""
+                filter_info = ""
+                if enable_balance_orders:
+                    filter_info = (f"\n📏 Giá: {min_price} - {max_price} USDT"
+                                   f"\n📊 Volume 24h: {min_volume} - {max_volume}")
 
                 success_msg = (f"✅ <b>ĐÃ TẠO BOT THÀNH CÔNG</b>\n\n"
                               f"🤖 Chiến lược: Cân bằng lệnh\n🔧 Chế độ: {bot_mode}\n"
                               f"🔢 Số bot: {bot_count}\n💰 Đòn bẩy: {leverage}x\n"
                               f"📊 % Số dư: {percent}%\n🎯 TP: {tp}%\n"
-                              f"🛡️ SL: {sl}%{roi_info}{pyramiding_info}{balance_info}")
+                              f"🛡️ SL: {sl}%{roi_info}{pyramiding_info}{balance_info}{filter_info}")
                 if bot_mode == 'static' and symbol:
                     success_msg += f"\n🔗 Coin: {symbol}"
 
