@@ -660,11 +660,11 @@ def filter_coins_for_side(side, excluded_coins=None):
             volume_zero += 1
 
         if side == "BUY":
-            if coin['price'] > max_price_buy or coin['volume'] > max_volume_buy:
+            if coin['price'] > max_price_buy and coin['volume'] > max_volume_buy:
                 condition_fail += 1
                 continue
         else:  # SELL
-            if coin['price'] < min_price_sell or coin['volume'] < min_volume_sell:
+            if coin['price'] < min_price_sell and coin['volume'] < min_volume_sell:
                 condition_fail += 1
                 continue
 
@@ -1680,24 +1680,14 @@ class BaseBot:
                     if side == "BUY":
                         max_price_buy = _BALANCE_CONFIG.get("max_price_buy", float('inf'))
                         max_volume_buy = _BALANCE_CONFIG.get("max_volume_buy", float('inf'))
-                        if current_price > max_price_buy:
-                            self.log(f"⚠️ {symbol} - Giá {current_price:.4f} > max_price_buy {max_price_buy}, không mở lệnh BUY")
-                            self.stop_symbol(symbol, failed=True)
-                            return False
-                        if coin_volume > max_volume_buy:
-                            self.log(f"⚠️ {symbol} - Volume {coin_volume:.2f} > max_volume_buy {max_volume_buy}, không mở lệnh BUY")
+                        if current_price > max_price_buy and coin_volume > max_volume_buy:
+                            self.log(f"⚠️ {symbol} - Cả giá và volume đều không đạt điều kiện BUY")
                             self.stop_symbol(symbol, failed=True)
                             return False
                     else:  # SELL
                         min_price_sell = _BALANCE_CONFIG.get("min_price_sell", 0.0)
                         min_volume_sell = _BALANCE_CONFIG.get("min_volume_sell", 0.0)
-                        if current_price < min_price_sell:
-                            self.log(f"⚠️ {symbol} - Giá {current_price:.4f} < min_price_sell {min_price_sell}, không mở lệnh SELL")
-                            self.stop_symbol(symbol, failed=True)
-                            return False
-                        if coin_volume < min_volume_sell:
-                            self.log(f"⚠️ {symbol} - Volume {coin_volume:.2f} < min_volume_sell {min_volume_sell}, không mở lệnh SELL")
-                            self.stop_symbol(symbol, failed=True)
+                        if current_price < min_price_sell and coin_volume < min_volume_sell:
                             return False
 
                 step_size = get_step_size(symbol)
